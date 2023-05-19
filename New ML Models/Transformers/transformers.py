@@ -5,6 +5,10 @@ from sklearn.preprocessing import MinMaxScaler
 import pandas as pd
 from tqdm import tqdm
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+from plotly_resampler import register_plotly_resampler
+import joblib
 
 
 class TTdata(tf.keras.utils.Sequence):
@@ -306,6 +310,13 @@ class CustomSchedule(tf.keras.optimizers.schedules.LearningRateSchedule):
 
         return tf.math.rsqrt(self.d_model) * tf.math.minimum(arg1, arg2)
 
+    def get_config(self):
+        config = {
+            'd_model': self.d_model,
+            'warmup_steps': self.warmup_steps,
+        }
+        return config
+
 
 def read_transform(csv_path):
     df = pd.read_csv(csv_path)
@@ -317,21 +328,9 @@ def read_transform(csv_path):
     return df, col_order.to_list()
 
 
-def train_transformers(data,
-                       train_test_ratio=0.8,
-                       epochs=30,
-                       num_layers=4,
-                       d_model=128,
-                       dff=512,
-                       num_heads=8,
-                       dropout_rate=0.1,
-                       input_length=4,
-                       output_length=1,
-                       batch_size=16,
-                       es_patience=4,
-                       opt_beta_1=0.9,
-                       opt_beta_2=0.98,
-                       opt_epsilon=1e-9):
+def train_transformers(data, train_test_ratio=0.8, epochs=30, num_layers=4, d_model=128, dff=512, num_heads=8,
+                       dropout_rate=0.1, input_length=4, output_length=1, batch_size=16, es_patience=4,
+                       opt_beta_1=0.9, opt_beta_2=0.98, opt_epsilon=1e-9):
     scaler = MinMaxScaler()
     data[:] = scaler.fit_transform(data)
 
@@ -350,7 +349,8 @@ def train_transformers(data,
     val_batches = TTdata(X_val, Y_val, batch_size, input_length, output_length)
 
     learning_rate = CustomSchedule(d_model)
-    optimizer = tf.keras.optimizers.Adam(learning_rate, beta_1=opt_beta_1, beta_2=opt_beta_2, epsilon=opt_epsilon)
+    # optimizer = tf.keras.optimizers.Adam(learning_rate=1e-4, beta_1=opt_beta_1, beta_2=opt_beta_2, epsilon=opt_epsilon)
+    optimizer = tf.keras.optimizers.Adam(learning_rate=1e-4)
     callback = tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=es_patience)
     out_features = Y_val.shape[1]
 
@@ -373,21 +373,20 @@ def train_transformers(data,
 
 def test_transformers(model, data, scaler, failed_sens=[], failed_idx=[], batch_size=16, input_length=4,
                       output_length=1):
-    # scaler = MinMaxScaler()
     data_col_order = data.columns
-    data[:] = scaler.transform(data)
+    data_ = data.copy()
+    data_[:] = scaler.transform(data_)
 
     for idx in range(len(failed_sens)):
-        data.loc[failed_idx[idx]:, failed_sens[idx]] = 0
+        data_.loc[failed_idx[idx]:, failed_sens[idx]] = 0
 
-    data_speed_drop = data.copy()
-    data_speed_drop.drop(data[["NH", "NL"]], axis=1, inplace=True)
-    # data_speed_drop.head(10)
+    data_speed_drop = data_.copy()
+    data_speed_drop.drop(data_[["NH", "NL"]], axis=1, inplace=True)
 
-    data_batches = Inf_TTdata(data, data_speed_drop, batch_size, input_length, output_length)
+    data_batches = Inf_TTdata(data_, data_speed_drop, batch_size, input_length, output_length)
 
     itr = True
-    for i in tqdm(range(int(data.shape[0] / batch_size))):
+    for i in tqdm(range(int(data_.shape[0] / batch_size))):
         pred = model.predict(data_batches.__getitem__(i), verbose=0)
         if not itr:
             pred_array = np.append(pred_array, pred, axis=0)
@@ -399,27 +398,20 @@ def test_transformers(model, data, scaler, failed_sens=[], failed_idx=[], batch_
     pred_array = pred_array.reshape((pred_array.shape[0], pred_array.shape[2]))
 
     pred_df = pd.DataFrame(pred_array, columns=data_col_order[:-2])
-    pred_df = pd.concat([pred_df, data[["NH", "NL"]][input_length + 1:].reset_index(drop=True)], axis=1)
-    # pred_df.head(10)
-    # pred_df.loc[-15:,:]
+    pred_df = pd.concat([pred_df, data_[["NH", "NL"]][input_length + 1:].reset_index(drop=True)], axis=1)
 
-    virtual_sens_df = data.copy()
-    virtual_sens_df = virtual_sens_df.loc[input_length + 1:, :].reset_index(drop=True)
+    virtual_sens_df = data_.copy()
 
     for idx in range(len(failed_sens)):
-        virtual_sens_df.loc[failed_idx[idx] - (input_length + 1):, failed_sens[idx]] = pred_df.loc[failed_idx[idx] - (
-                input_length + 1):, failed_sens[idx]]
-
-    # virtual_sens_df.loc[-15:,:]
-    # virtual_sens_df.head(10)
+        virtual_sens_df.loc[failed_idx[idx]:, failed_sens[idx]] = pred_df.loc[failed_idx[idx] - (input_length + 1):,
+                                                                  failed_sens[idx]].to_numpy()
 
     virtual_sens_df[:] = scaler.inverse_transform(virtual_sens_df)
-    data[:] = scaler.inverse_transform(data)
 
     mae, mse, rmse, r2 = [], [], [], []
     for idx in range(len(failed_sens)):
         y_true = data.loc[failed_idx[idx]:, failed_sens[idx]]
-        y_pred = virtual_sens_df.loc[failed_idx[idx] - (input_length + 1):, failed_sens[idx]]
+        y_pred = virtual_sens_df.loc[failed_idx[idx]:, failed_sens[idx]]
 
         mae.append(mean_absolute_error(y_true, y_pred))
         mse.append(mean_squared_error(y_true, y_pred))
@@ -433,21 +425,20 @@ def test_transformers(model, data, scaler, failed_sens=[], failed_idx=[], batch_
 
 def inference_transformers(model, data, scaler, failed_sens=[], failed_idx=[], batch_size=16, input_length=4,
                            output_length=1):
-    # scaler = MinMaxScaler()
     data_col_order = data.columns
-    data[:] = scaler.transform(data)
+    data_ = data.copy()
+    data_[:] = scaler.transform(data_)
 
     for idx in range(len(failed_sens)):
-        data.loc[failed_idx[idx]:, failed_sens[idx]] = 0
+        data_.loc[failed_idx[idx]:, failed_sens[idx]] = 0
 
-    data_speed_drop = data.copy()
-    data_speed_drop.drop(data[["NH", "NL"]], axis=1, inplace=True)
-    # data_speed_drop.head(10)
+    data_speed_drop = data_.copy()
+    data_speed_drop.drop(data_[["NH", "NL"]], axis=1, inplace=True)
 
-    data_batches = Inf_TTdata(data, data_speed_drop, batch_size, input_length, output_length)
+    data_batches = Inf_TTdata(data_, data_speed_drop, batch_size, input_length, output_length)
 
     itr = True
-    for i in tqdm(range(int(data.shape[0] / batch_size))):
+    for i in tqdm(range(int(data_.shape[0] / batch_size))):
         pred = model.predict(data_batches.__getitem__(i), verbose=0)
         if not itr:
             pred_array = np.append(pred_array, pred, axis=0)
@@ -459,23 +450,34 @@ def inference_transformers(model, data, scaler, failed_sens=[], failed_idx=[], b
     pred_array = pred_array.reshape((pred_array.shape[0], pred_array.shape[2]))
 
     pred_df = pd.DataFrame(pred_array, columns=data_col_order[:-2])
-    pred_df = pd.concat([pred_df, data[["NH", "NL"]][input_length + 1:].reset_index(drop=True)], axis=1)
-    # pred_df.head(10)
-    # pred_df.loc[-15:,:]
+    pred_df = pd.concat([pred_df, data_[["NH", "NL"]][input_length + 1:].reset_index(drop=True)], axis=1)
 
-    virtual_sens_df = data.copy()
-    virtual_sens_df = virtual_sens_df.loc[input_length + 1:, :].reset_index(drop=True)
+    virtual_sens_df = data_.copy()
 
     for idx in range(len(failed_sens)):
-        virtual_sens_df.loc[failed_idx[idx] - (input_length + 1):, failed_sens[idx]] = pred_df.loc[failed_idx[idx] - (
-                input_length + 1):, failed_sens[idx]]
+        virtual_sens_df.loc[failed_idx[idx]:, failed_sens[idx]] = pred_df.loc[failed_idx[idx] - (input_length + 1):,
+                                                                  failed_sens[idx]].to_numpy()
 
-    # virtual_sens_df.loc[-15:,:]
-    # virtual_sens_df.head(10)
     virtual_sens_df[:] = scaler.inverse_transform(virtual_sens_df)
-    data[:] = scaler.inverse_transform(data)
 
     return virtual_sens_df
+
+
+def plot(actual_data, pred_data, nh, nl, sens_name):
+    register_plotly_resampler(mode='auto', default_n_shown_samples=10000)
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    time = nh.index / 5400
+
+    fig.add_trace(go.Scatter(x=time, y=nh, mode='lines', name="NH"), secondary_y=True)
+    fig.add_trace(go.Scatter(x=time, y=nl, mode='lines', name="NL"), secondary_y=True)
+    fig.add_trace(go.Scatter(x=time, y=actual_data, mode='lines', name=sens_name + "_act"), secondary_y=False)
+    fig.add_trace(go.Scatter(x=time, y=pred_data, mode='lines', name=sens_name + "_pred"), secondary_y=False)
+    fig.update_layout(title_text="Transformers", height=600)
+    # Naming axes
+    fig.update_xaxes(title_text="Time (s)")
+    fig.update_yaxes(title_text="NH & NL (%)", secondary_y=True)
+    fig.update_yaxes(title_text="Actual & Prediction", secondary_y=False)
+    fig.show_dash(host=f"127.0.0.4", port=f"8001")
 
 
 # Train the model
@@ -532,18 +534,23 @@ print("\n", virtual_sens_df.head())
 print("\n", test_metrics)
 
 # Inferencing the model
-failed_sens = ["Sensor F"]
-failed_idx = [9]
-inf_data_csv_path = r"C:\Users\USER\Desktop\Work\Virtual Sensor Enhancement\New ML models\test_data\HF_inf_data.csv"
-inf_data, inf_col_order = read_transform(inf_data_csv_path)
+# failed_sens = ["Sensor F"]
+# failed_idx = [9]
+# inf_data_csv_path = r"C:\Users\USER\Desktop\Work\Virtual Sensor Enhancement\New ML models\test_data\HF_inf_data.csv"
+# inf_data, inf_col_order = read_transform(inf_data_csv_path)
+#
+# inf_virtual_sens_df = inference_transformers(model=model,
+#                                              data=inf_data,
+#                                              scaler=scaler,
+#                                              failed_sens=failed_sens,
+#                                              failed_idx=failed_idx,
+#                                              batch_size=batch_size,
+#                                              input_length=input_length,
+#                                              output_length=output_length)
+#
+# print("\n", inf_virtual_sens_df.head())
 
-inf_virtual_sens_df = inference_transformers(model=model,
-                                             data=inf_data,
-                                             scaler=scaler,
-                                             failed_sens=failed_sens,
-                                             failed_idx=failed_idx,
-                                             batch_size=batch_size,
-                                             input_length=input_length,
-                                             output_length=output_length)
-
-print("\n", inf_virtual_sens_df.head())
+# Plotting
+for failed_sen in failed_sens:
+    plot(actual_data=test_data[failed_sen], pred_data=virtual_sens_df[failed_sen], nh=test_data["NH"], nl=test_data["NL"],
+         sens_name=failed_sen)
