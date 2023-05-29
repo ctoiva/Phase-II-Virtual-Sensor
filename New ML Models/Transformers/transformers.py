@@ -85,11 +85,10 @@ class PositionalEmbedding(tf.keras.layers.Layer):
             axis=-1)
         self.pos_encoding = tf.cast(pos_encoding, dtype=tf.float32)
 
-        # self.embedding = tf.keras.layers.Embedding(vocab_size, d_model, mask_zero=True)
-        # self.pos_encoding = positional_encoding(length=2048, depth=d_model)
-
-    # def compute_mask(self, *args, **kwargs):
-    #     return self.embedding.compute_mask(*args, **kwargs)
+    def get_config(self):
+        config = super().get_config()
+        config.update({"d_model": self.d_model, "pos_encoding": self.pos_encoding, "dropout": self.dropout})
+        return config
 
     def call(self, x):
         length = tf.shape(x)[1]
@@ -107,8 +106,20 @@ class BaseAttention(tf.keras.layers.Layer):
         self.layernorm = tf.keras.layers.LayerNormalization()
         self.add = tf.keras.layers.Add()
 
+    def get_config(self):
+        config = super().get_config()
+        config.update({"mha": self.mha, "layernorm": self.layernorm, "add": self.add})
+        return config
+
 
 class CrossAttention(BaseAttention):
+    def get_config(self):
+        config = super(BaseAttention, self).get_config()
+        # config.update({"mha": self.mha, "last_attn_scores": self.last_attn_scores, "add": self.add,
+        #                "layernorm": self.layernorm})
+        config.update({"last_attn_scores": self.last_attn_scores})
+        return config
+
     def call(self, x, context):
         attn_output, attn_scores = self.mha(
             query=x,
@@ -126,6 +137,12 @@ class CrossAttention(BaseAttention):
 
 
 class GlobalSelfAttention(BaseAttention):
+    def get_config(self):
+        config = super(BaseAttention, self).get_config()
+        # config.update({"mha": self.mha, "add": self.add, "layernorm": self.layernorm})
+        # config = {"mha": self.mha, "add": self.add, "layernorm": self.layernorm}
+        return config
+
     def call(self, x):
         attn_output = self.mha(
             query=x,
@@ -137,6 +154,11 @@ class GlobalSelfAttention(BaseAttention):
 
 
 class CausalSelfAttention(BaseAttention):
+    def get_config(self):
+        config = super(BaseAttention, self).get_config()
+        # config.update({"mha": self.mha, "add": self.add, "layernorm": self.layernorm})
+        return config
+
     def call(self, x):
         attn_output = self.mha(
             query=x,
@@ -159,6 +181,11 @@ class FeedForward(tf.keras.layers.Layer):
         self.add = tf.keras.layers.Add()
         self.layer_norm = tf.keras.layers.LayerNormalization()
 
+    def get_config(self):
+        config = super().get_config()
+        config.update({"add": self.add, "layer_norm": self.layer_norm})
+        return config
+
     def call(self, x):
         x = self.add([x, self.seq(x)])
         x = self.layer_norm(x)
@@ -176,6 +203,11 @@ class EncoderLayer(tf.keras.layers.Layer):
 
         self.ffn = FeedForward(d_model, dff)
 
+    def get_config(self):
+        config = super().get_config()
+        config.update({"self_attention": self.self_attention, "ffn": self.ffn})
+        return config
+
     def call(self, x):
         x = self.self_attention(x)
         x = self.ffn(x)
@@ -183,19 +215,19 @@ class EncoderLayer(tf.keras.layers.Layer):
 
 
 class Encoder(tf.keras.layers.Layer):
-    def __init__(self, *, num_layers, d_model, num_heads,
-                 dff, dropout_rate=0.1):
+    def __init__(self, *, num_layers, d_model, num_heads, dff, dropout_rate=0.1):
         super().__init__()
 
         self.d_model = d_model
         self.num_layers = num_layers
 
-        self.enc_layers = [
-            EncoderLayer(d_model=d_model,
-                         num_heads=num_heads,
-                         dff=dff,
-                         dropout_rate=dropout_rate)
-            for _ in range(num_layers)]
+        self.enc_layers = [EncoderLayer(d_model=d_model, num_heads=num_heads, dff=dff, dropout_rate=dropout_rate)
+                           for _ in range(num_layers)]
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({"d_model": self.d_model, "num_layers": self.num_layers, "enc_layers": self.enc_layers})
+        return config
 
     def call(self, x):
         for i in range(self.num_layers):
@@ -214,6 +246,12 @@ class DecoderLayer(tf.keras.layers.Layer):
         self.cross_attention = CrossAttention(num_heads=num_heads, key_dim=d_model, dropout=dropout_rate)
 
         self.ffn = FeedForward(d_model, dff)
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({"causal_self_attention": self.causal_self_attention, "cross_attention": self.cross_attention,
+                       "last_attn_scores": self.last_attn_scores, "ffn": self.ffn})
+        return config
 
     def call(self, x, context):
         x = self.causal_self_attention(x=x)
@@ -237,6 +275,12 @@ class Decoder(tf.keras.layers.Layer):
                            for _ in range(num_layers)]
 
         self.last_attn_scores = None
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({"num_layers": self.num_layers, "dec_layers": self.dec_layers,
+                       "last_attn_scores": self.last_attn_scores})
+        return config
 
     def call(self, x, context):
         # `x` is token-IDs shape (batch, target_seq_len)
@@ -266,6 +310,13 @@ class Transformer(tf.keras.Model):
                                dropout_rate=dropout_rate)
 
         self.final_layer = tf.keras.layers.Dense(out_features)
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({"encoder_input": self.encoder_input, "pos_embedding": self.pos_embedding,
+                       "encoder": self.encoder, "decoder_input": self.decoder_input,
+                       "decoder": self.decoder, "final_layer": self.final_layer})
+        return config
 
     def call(self, inputs):
         # To use a Keras model with `.fit` you must pass all your inputs in the
@@ -303,19 +354,16 @@ class CustomSchedule(tf.keras.optimizers.schedules.LearningRateSchedule):
 
         self.warmup_steps = warmup_steps
 
+    def get_config(self):
+        config = {'d_model': self.d_model, 'warmup_steps': self.warmup_steps}
+        return config
+
     def __call__(self, step):
         step = tf.cast(step, dtype=tf.float32)
         arg1 = tf.math.rsqrt(step)
         arg2 = step * (self.warmup_steps ** -1.5)
 
         return tf.math.rsqrt(self.d_model) * tf.math.minimum(arg1, arg2)
-
-    def get_config(self):
-        config = {
-            'd_model': self.d_model,
-            'warmup_steps': self.warmup_steps,
-        }
-        return config
 
 
 def read_transform(csv_path):
@@ -386,7 +434,7 @@ def test_transformers(model, data, scaler, failed_sens=[], failed_idx=[], batch_
     data_batches = Inf_TTdata(data_, data_speed_drop, batch_size, input_length, output_length)
 
     itr = True
-    for i in tqdm(range(int(data_.shape[0] / batch_size))):
+    for i in tqdm(range(int(np.ceil(data_.shape[0] / batch_size)))):
         pred = model.predict(data_batches.__getitem__(i), verbose=0)
         if not itr:
             pred_array = np.append(pred_array, pred, axis=0)
@@ -438,7 +486,7 @@ def inference_transformers(model, data, scaler, failed_sens=[], failed_idx=[], b
     data_batches = Inf_TTdata(data_, data_speed_drop, batch_size, input_length, output_length)
 
     itr = True
-    for i in tqdm(range(int(data_.shape[0] / batch_size))):
+    for i in tqdm(range(int(np.ceil(data_.shape[0] / batch_size)))):
         pred = model.predict(data_batches.__getitem__(i), verbose=0)
         if not itr:
             pred_array = np.append(pred_array, pred, axis=0)
@@ -515,12 +563,48 @@ model, scaler, _, _ = train_transformers(data=data,
                                          opt_beta_2=opt_beta_2,
                                          opt_epsilon=opt_epsilon)
 
+# # Saving the model and scaler
+# joblib.dump(scaler, 'scaler.save')
+# # tf.keras.models.save_model(model, 'model', save_format="tf")
+# model.save_weights('model_weights.h5')
+# # serialize model to json
+# json_model = model.to_json()
+# #save the model architecture to JSON file
+# with open('model.json', 'w') as json_file:
+#     json_file.write(json_model)
+#
+# # Loading the model and scaler
+# loaded_scaler = joblib.load('scaler.save')
+# # loaded_model = tf.keras.models.load_model('model.h5', custom_objects={'Transformer': Transformer})
+# #Reading the model from JSON file
+# with open('model.json', 'r') as json_file:
+#     json_savedModel= json_file.read()
+# #load the model architecture
+# loaded_model = tf.keras.models.model_from_json(json_savedModel)
+# loaded_model.load_weights('model_weights.h5')
+# loaded_model.summary()
+
 # Testing the model
 failed_sens = ["Sensor F"]
 failed_idx = [7]
 test_data_csv_path = r"C:\Users\USER\Desktop\Work\Virtual Sensor Enhancement\New ML models\test_data\HF_test_data.csv"
 test_data, test_col_order = read_transform(test_data_csv_path)
 
+virtual_sens_df, test_metrics = test_transformers(model=model,
+                                                  data=test_data,
+                                                  scaler=scaler,
+                                                  failed_sens=failed_sens,
+                                                  failed_idx=failed_idx,
+                                                  batch_size=batch_size,
+                                                  input_length=input_length,
+                                                  output_length=output_length)
+
+print("\n", virtual_sens_df.head())
+print("\n", test_metrics)
+
+# del model, virtual_sens_df, test_metrics, scaler
+
+# Testing the loaded model
 virtual_sens_df, test_metrics = test_transformers(model=model,
                                                   data=test_data,
                                                   scaler=scaler,
@@ -552,5 +636,5 @@ print("\n", test_metrics)
 
 # Plotting
 for failed_sen in failed_sens:
-    plot(actual_data=test_data[failed_sen], pred_data=virtual_sens_df[failed_sen], nh=test_data["NH"], nl=test_data["NL"],
-         sens_name=failed_sen)
+    plot(actual_data=test_data[failed_sen], pred_data=virtual_sens_df[failed_sen], nh=test_data["NH"],
+         nl=test_data["NL"], sens_name=failed_sen)
