@@ -372,33 +372,34 @@ def read_transform(csv_path):
     nl = df.pop("NL")
     df.insert(len(df.columns), "NH", nh)
     df.insert(len(df.columns), "NL", nl)
+    df = df.fillna(0)
     col_order = df.columns
     return df, col_order.to_list()
 
 
-def train_transformers(data, train_test_ratio=0.8, epochs=30, num_layers=4, d_model=128, dff=512, num_heads=8,
+# In[6]:
+
+
+def train_transformers(train_data, val_data, train_test_ratio=0.8, epochs=30, num_layers=4, d_model=128, dff=512, num_heads=8,
                        dropout_rate=0.1, input_length=4, output_length=1, batch_size=16, es_patience=4,
                        opt_beta_1=0.9, opt_beta_2=0.98, opt_epsilon=1e-9):
     scaler = MinMaxScaler()
-    data[:] = scaler.fit_transform(data)
+    train_data[:] = scaler.fit_transform(train_data)
+    val_data[:] = scaler.transform(val_data)
 
-    split = int(data.shape[0] * train_test_ratio)
+#     train_split = int(train_data.shape[0] * train_test_ratio)
+#     val_split = int(val_data.shape[0] * train_test_ratio)
 
-    X = data.copy()
-    Y = data.drop(['NH', 'NL'], axis=1)
-
-    input_size = X.shape[1]
-    num_predicted_features = Y.shape[1]
-
-    X_train, Y_train = X[:split], Y[:split]
-    X_val, Y_val = X[split:], Y[split:]
+    X_train, Y_train = train_data, train_data.drop(['NH', 'NL'], axis=1)
+    X_val, Y_val = val_data, val_data.drop(['NH', 'NL'], axis=1)
 
     train_batches = TTdata(X_train, Y_train, batch_size, input_length, output_length)
     val_batches = TTdata(X_val, Y_val, batch_size, input_length, output_length)
 
     learning_rate = CustomSchedule(d_model)
-    # optimizer = tf.keras.optimizers.Adam(learning_rate=1e-4, beta_1=opt_beta_1, beta_2=opt_beta_2, epsilon=opt_epsilon)
+#     optimizer = tf.keras.optimizers.Adam(learning_rate=1e-4, beta_1=opt_beta_1, beta_2=opt_beta_2, epsilon=opt_epsilon)
     optimizer = tf.keras.optimizers.Adam(learning_rate=1e-4)
+#     optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
     callback = tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=es_patience)
     out_features = Y_val.shape[1]
 
@@ -416,7 +417,7 @@ def train_transformers(data, train_test_ratio=0.8, epochs=30, num_layers=4, d_mo
 
     print(model.summary())
 
-    return model, scaler, input_size, num_predicted_features
+    return model, scaler
 
 
 def test_transformers(model, data, scaler, failed_sens=[], failed_idx=[], batch_size=16, input_length=4,
@@ -434,7 +435,7 @@ def test_transformers(model, data, scaler, failed_sens=[], failed_idx=[], batch_
     data_batches = Inf_TTdata(data_, data_speed_drop, batch_size, input_length, output_length)
 
     itr = True
-    for i in tqdm(range(int(np.ceil(data_.shape[0] / batch_size)))):
+    for i in tqdm(range(len(data_batches))):
         pred = model.predict(data_batches.__getitem__(i), verbose=0)
         if not itr:
             pred_array = np.append(pred_array, pred, axis=0)
@@ -446,7 +447,7 @@ def test_transformers(model, data, scaler, failed_sens=[], failed_idx=[], batch_
     pred_array = pred_array.reshape((pred_array.shape[0], pred_array.shape[2]))
 
     pred_df = pd.DataFrame(pred_array, columns=data_col_order[:-2])
-    pred_df = pd.concat([pred_df, data_[["NH", "NL"]][input_length + 1:].reset_index(drop=True)], axis=1)
+    # pred_df = pd.concat([pred_df, data_[["NH", "NL"]][input_length + 1:].reset_index(drop=True)], axis=1)
 
     virtual_sens_df = data_.copy()
 
@@ -463,12 +464,15 @@ def test_transformers(model, data, scaler, failed_sens=[], failed_idx=[], batch_
 
         mae.append(mean_absolute_error(y_true, y_pred))
         mse.append(mean_squared_error(y_true, y_pred))
-        rmse.extend(list(np.sqrt(mse)))
+        rmse.append(np.sqrt(mean_squared_error(y_true, y_pred)))
         r2.append(r2_score(y_true, y_pred))
 
     test_metrics = pd.DataFrame({"Sensor Name": failed_sens, "MAE": mae, "MSE": mse, "RMSE": rmse, "R2_squared": r2})
 
-    return virtual_sens_df, test_metrics
+    pred_df = pd.concat([pred_df, data_[["NH", "NL"]][input_length + 1:].reset_index(drop=True)], axis=1)
+    pred_df[:] = scaler.inverse_transform(pred_df)
+
+    return virtual_sens_df, test_metrics, pred_df
 
 
 def inference_transformers(model, data, scaler, failed_sens=[], failed_idx=[], batch_size=16, input_length=4,
@@ -486,7 +490,7 @@ def inference_transformers(model, data, scaler, failed_sens=[], failed_idx=[], b
     data_batches = Inf_TTdata(data_, data_speed_drop, batch_size, input_length, output_length)
 
     itr = True
-    for i in tqdm(range(int(np.ceil(data_.shape[0] / batch_size)))):
+    for i in tqdm(range(len(data_batches))):
         pred = model.predict(data_batches.__getitem__(i), verbose=0)
         if not itr:
             pred_array = np.append(pred_array, pred, axis=0)
@@ -529,7 +533,8 @@ def plot(actual_data, pred_data, nh, nl, sens_name):
 
 
 # Train the model
-csv_path = r'C:\Users\USER\Desktop\Work\Virtual Sensor Enhancement\New ML models\test_data\HF_train_data.csv'
+train_csv_path = r'C:\Users\USER\Desktop\Work\Virtual Sensor Enhancement\New ML models\test_data\HF_train_data.csv'
+val_csv_path = r"C:\Users\USER\Desktop\Work\Virtual Sensor Enhancement\New ML models\test_data\.csv"
 train_test_ratio = 0.8
 epochs = 30
 num_layers = 4
@@ -537,7 +542,7 @@ d_model = 128
 dff = 512
 num_heads = 8
 dropout_rate = 0.1
-input_length = 4
+input_length = 32
 output_length = 1
 batch_size = 16
 es_patience = 4
@@ -545,9 +550,10 @@ opt_beta_1 = 0.9
 opt_beta_2 = 0.98
 opt_epsilon = 1e-9
 
-data, col_order = read_transform(csv_path)
+train_data, col_order = read_transform(train_csv_path)
+val_data, val_col_order = read_transform(val_csv_path)
 
-model, scaler, _, _ = train_transformers(data=data,
+model, scaler = train_transformers(train_data=train_data, val_data=val_data,
                                          train_test_ratio=train_test_ratio,
                                          epochs=epochs,
                                          num_layers=num_layers,
@@ -590,7 +596,7 @@ failed_idx = [7]
 test_data_csv_path = r"C:\Users\USER\Desktop\Work\Virtual Sensor Enhancement\New ML models\test_data\HF_test_data.csv"
 test_data, test_col_order = read_transform(test_data_csv_path)
 
-virtual_sens_df, test_metrics = test_transformers(model=model,
+virtual_sens_df, test_metrics, pred_only_df = test_transformers(model=model,
                                                   data=test_data,
                                                   scaler=scaler,
                                                   failed_sens=failed_sens,
@@ -605,17 +611,17 @@ print("\n", test_metrics)
 # del model, virtual_sens_df, test_metrics, scaler
 
 # Testing the loaded model
-virtual_sens_df, test_metrics = test_transformers(model=model,
-                                                  data=test_data,
-                                                  scaler=scaler,
-                                                  failed_sens=failed_sens,
-                                                  failed_idx=failed_idx,
-                                                  batch_size=batch_size,
-                                                  input_length=input_length,
-                                                  output_length=output_length)
-
-print("\n", virtual_sens_df.head())
-print("\n", test_metrics)
+# virtual_sens_df, test_metrics, pred_only_df = test_transformers(model=model,
+#                                                   data=test_data,
+#                                                   scaler=scaler,
+#                                                   failed_sens=failed_sens,
+#                                                   failed_idx=failed_idx,
+#                                                   batch_size=batch_size,
+#                                                   input_length=input_length,
+#                                                   output_length=output_length)
+#
+# print("\n", virtual_sens_df.head())
+# print("\n", test_metrics)
 
 # Inferencing the model
 # failed_sens = ["Sensor F"]
